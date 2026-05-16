@@ -19,7 +19,10 @@ target_compile_options(kvstore_common INTERFACE
 )
 
 # Executables. Source lists are extended as each component lands.
-add_executable(kvstore-server src/main.cpp)
+add_executable(kvstore-server
+    src/main.cpp
+    src/store.cpp
+)
 target_link_libraries(kvstore-server PRIVATE kvstore_common)
 
 add_executable(kvstore-cli tests/client.cpp)
