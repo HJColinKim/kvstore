@@ -1,6 +1,7 @@
-// Component 2 scaffolding: exercises the Store API. Replaced by the real
-// server wire-up in Component 5.
+// Pre-Component-5 scaffolding: exercises Store and Protocol in isolation.
+// Replaced by the real server wire-up in Component 5.
 
+#include "protocol.hpp"
 #include "store.hpp"
 
 #include <atomic>
@@ -10,6 +11,7 @@
 #include <random>
 #include <string>
 #include <thread>
+#include <variant>
 #include <vector>
 
 namespace {
@@ -82,12 +84,111 @@ void test_concurrency() {
               << " keys live)\n";
 }
 
+bool is_ok(const ParseResult& r) {
+    return std::holds_alternative<Command>(r);
+}
+bool is_err(const ParseResult& r) {
+    return std::holds_alternative<ParseError>(r);
+}
+const Command& cmd(const ParseResult& r) {
+    return std::get<Command>(r);
+}
+
+void test_protocol_parse() {
+    using namespace std::chrono_literals;
+
+    // KEYS
+    {
+        auto r = parse_line("KEYS");
+        assert(is_ok(r) && cmd(r).verb == Verb::KEYS);
+    }
+    assert(is_err(parse_line("KEYS extra")));
+
+    // GET / DEL / EXISTS — single key, no whitespace
+    {
+        auto r = parse_line("GET hello");
+        assert(is_ok(r) && cmd(r).verb == Verb::GET && cmd(r).key == "hello");
+    }
+    {
+        auto r = parse_line("GET hello\r");          // CRLF tolerated
+        assert(is_ok(r) && cmd(r).key == "hello");
+    }
+    assert(is_err(parse_line("GET")));
+    assert(is_err(parse_line("GET ")));              // trailing space, empty key
+    assert(is_err(parse_line("GET k extra")));
+    assert(is_err(parse_line("DEL")));
+    assert(is_ok(parse_line("DEL k")));
+    assert(is_ok(parse_line("EXISTS k")));
+
+    // SET — rest-of-line value
+    {
+        auto r = parse_line("SET k v");
+        assert(is_ok(r) && cmd(r).verb == Verb::SET);
+        assert(cmd(r).key == "k" && cmd(r).value == "v");
+    }
+    {
+        auto r = parse_line("SET k hello world");
+        assert(is_ok(r));
+        assert(cmd(r).key == "k" && cmd(r).value == "hello world");
+    }
+    {
+        auto r = parse_line("SET k hello\tworld");    // tab is part of value
+        assert(is_ok(r) && cmd(r).value == "hello\tworld");
+    }
+    assert(is_err(parse_line("SET")));
+    assert(is_err(parse_line("SET k")));              // missing value
+    assert(is_err(parse_line("SET k ")));             // empty value
+    assert(is_err(parse_line("SET  k v")));           // double space => empty key
+
+    // EXPIRE
+    {
+        auto r = parse_line("EXPIRE k 5");
+        assert(is_ok(r) && cmd(r).verb == Verb::EXPIRE);
+        assert(cmd(r).key == "k" && cmd(r).ttl == 5s);
+    }
+    {
+        auto r = parse_line("EXPIRE k 0");
+        assert(is_ok(r) && cmd(r).ttl == 0s);
+    }
+    assert(is_err(parse_line("EXPIRE k -1")));
+    assert(is_err(parse_line("EXPIRE k abc")));
+    assert(is_err(parse_line("EXPIRE k 5 extra")));   // trailing garbage
+    assert(is_err(parse_line("EXPIRE k")));           // missing ttl
+    assert(is_err(parse_line("EXPIRE")));
+
+    // Unknown / empty
+    assert(is_err(parse_line("HELLO")));
+    assert(is_err(parse_line("")));
+
+    // Oversize line
+    {
+        std::string huge(kMaxLineBytes + 1, 'x');
+        assert(is_err(parse_line(huge)));
+    }
+
+    std::cout << "[ok] protocol parser\n";
+}
+
+void test_protocol_responses() {
+    assert(respond_ok() == "OK\n");
+    assert(respond_not_found() == "NOT_FOUND\n");
+    assert(respond_value("x") == "VALUE x\n");
+    assert(respond_value("hello world") == "VALUE hello world\n");
+    assert(respond_count(0) == "COUNT 0\n");
+    assert(respond_count(42) == "COUNT 42\n");
+    assert(respond_key("foo") == "KEY foo\n");
+    assert(respond_error("oops") == "ERROR oops\n");
+    std::cout << "[ok] protocol response builders\n";
+}
+
 }  // namespace
 
 int main() {
     test_single_threaded();
     test_ttl();
     test_concurrency();
-    std::cout << "Store: all tests passed\n";
+    test_protocol_parse();
+    test_protocol_responses();
+    std::cout << "Store + Protocol: all tests passed\n";
     return 0;
 }

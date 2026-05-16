@@ -22,6 +22,7 @@ target_compile_options(kvstore_common INTERFACE
 add_executable(kvstore-server
     src/main.cpp
     src/store.cpp
+    src/protocol.cpp
 )
 target_link_libraries(kvstore-server PRIVATE kvstore_common)
 
