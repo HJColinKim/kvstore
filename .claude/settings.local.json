@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/hjcol/**)",
+      "Read(//mnt/c/Users/hjcol/Downloads/**)",
+      "Bash(dir)",
+      "Bash(wsl -l -v)",
+      "Bash(wsl *)",
+      "Bash(/c/msys64/ucrt64/bin/g++.exe --version)",
+      "Bash(/c/msys64/ucrt64/bin/g++.exe -std=c++20 -Wall -Wextra -Wpedantic -O2 -Iinclude -c src/main.cpp -o /tmp/main.o)",
+      "Bash(/c/msys64/ucrt64/bin/g++.exe -std=c++20 -Wall -Wextra -Wpedantic -O2 -Iinclude -c tests/client.cpp -o /tmp/client.o)",
+      "Bash(/c/msys64/ucrt64/bin/g++.exe -std=c++20 -Wall -Wextra -Wpedantic -O2 -Iinclude -c tests/benchmark.cpp -o /tmp/bench.o)",
+      "Bash(/c/msys64/ucrt64/bin/g++.exe -dumpversion)",
+      "Bash(echo \"All three stubs compile cleanly under -Wall -Wextra -Wpedantic on $\\(/c/msys64/ucrt64/bin/g++.exe -dumpversion\\)\")",
+      "Bash(git *)"
+    ]
+  }
+}
