@@ -23,6 +23,7 @@ add_executable(kvstore-server
     src/main.cpp
     src/store.cpp
     src/protocol.cpp
+    src/thread_pool.cpp
 )
 target_link_libraries(kvstore-server PRIVATE kvstore_common)
 

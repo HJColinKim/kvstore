@@ -3,12 +3,14 @@
 
 #include "protocol.hpp"
 #include "store.hpp"
+#include "thread_pool.hpp"
 
 #include <atomic>
 #include <cassert>
 #include <chrono>
 #include <iostream>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <variant>
@@ -181,6 +183,56 @@ void test_protocol_responses() {
     std::cout << "[ok] protocol response builders\n";
 }
 
+void test_threadpool_drains_queue() {
+    constexpr int tasks = 1000;
+    std::atomic<int> counter{0};
+    {
+        ThreadPool pool(4);
+        assert(pool.size() == 4);
+        for (int i = 0; i < tasks; ++i) {
+            pool.submit([&counter] {
+                std::this_thread::sleep_for(std::chrono::microseconds(50));
+                counter.fetch_add(1, std::memory_order_relaxed);
+            });
+        }
+    }   // ~ThreadPool drains the queue before returning
+    assert(counter.load() == tasks);
+    std::cout << "[ok] threadpool drains " << tasks << " tasks before dtor returns\n";
+}
+
+void test_threadpool_blocks_on_inflight_task() {
+    using namespace std::chrono_literals;
+    std::atomic<bool> task_done{false};
+    const auto start = std::chrono::steady_clock::now();
+    {
+        ThreadPool pool(2);
+        pool.submit([&task_done] {
+            std::this_thread::sleep_for(120ms);
+            task_done = true;
+        });
+        // Fall off scope immediately; destructor must wait for the long task.
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    assert(task_done.load());
+    assert(elapsed >= 100ms);
+    std::cout << "[ok] threadpool dtor waits for in-flight long task\n";
+}
+
+void test_threadpool_isolates_exceptions() {
+    std::atomic<int> good{0};
+    {
+        ThreadPool pool(2);
+        for (int i = 0; i < 10; ++i) {
+            pool.submit([] { throw std::runtime_error("boom"); });
+        }
+        for (int i = 0; i < 10; ++i) {
+            pool.submit([&good] { good.fetch_add(1); });
+        }
+    }
+    assert(good.load() == 10);
+    std::cout << "[ok] threadpool keeps workers alive across task exceptions\n";
+}
+
 }  // namespace
 
 int main() {
@@ -189,6 +241,9 @@ int main() {
     test_concurrency();
     test_protocol_parse();
     test_protocol_responses();
-    std::cout << "Store + Protocol: all tests passed\n";
+    test_threadpool_drains_queue();
+    test_threadpool_blocks_on_inflight_task();
+    test_threadpool_isolates_exceptions();
+    std::cout << "Store + Protocol + ThreadPool: all tests passed\n";
     return 0;
 }
