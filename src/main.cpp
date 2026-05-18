@@ -1,249 +1,109 @@
-// Pre-Component-5 scaffolding: exercises Store and Protocol in isolation.
-// Replaced by the real server wire-up in Component 5.
-
-#include "protocol.hpp"
+#include "server.hpp"
 #include "store.hpp"
 #include "thread_pool.hpp"
 
 #include <atomic>
-#include <cassert>
-#include <chrono>
+#include <cerrno>
+#include <charconv>
+#include <csignal>
+#include <cstdint>
+#include <cstddef>
+#include <exception>
 #include <iostream>
-#include <random>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <thread>
-#include <variant>
-#include <vector>
 
 namespace {
 
-void test_single_threaded() {
-    Store s(4);
-    s.set("a", "1");
-    assert(s.exists("a"));
-    assert(s.get("a") == std::optional<std::string>{"1"});
+// The signal handler runs in async-signal context and cannot safely close
+// over local state, so the server pointer lives in a small atomic global.
+// load/store on a lock-free atomic<T*> is async-signal-safe on every platform
+// we'd run this on, and Server::request_shutdown itself only does an atomic
+// exchange and a close() — both on the POSIX async-signal-safe list.
+std::atomic<Server*> g_server{nullptr};
 
-    s.set("a", "2");
-    assert(s.get("a") == std::optional<std::string>{"2"});
-
-    assert(s.del("a"));
-    assert(!s.exists("a"));
-    assert(!s.del("a"));
-    assert(s.get("a") == std::nullopt);
-
-    std::cout << "[ok] single-threaded set/get/del/exists\n";
+extern "C" void on_signal(int) {
+    if (auto* s = g_server.load(std::memory_order_acquire)) {
+        s->request_shutdown();
+    }
 }
 
-void test_ttl() {
-    using namespace std::chrono_literals;
-    Store s(4);
-
-    s.set_with_ttl("k", "v", 1s);
-    assert(s.exists("k"));
-    std::this_thread::sleep_for(1100ms);
-    assert(!s.exists("k"));
-    assert(s.get("k") == std::nullopt);
-
-    s.set("k2", "v2");
-    assert(s.expire("k2", 0s));      // deadline = now -> immediately expired
-    assert(!s.exists("k2"));         // lazy sweep on the read path
-    assert(!s.expire("missing", 5s));
-
-    std::cout << "[ok] TTL expiry (lazy)\n";
+void install_signal(int sig, void (*handler)(int)) {
+    struct sigaction sa{};
+    sa.sa_handler = handler;
+    ::sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    if (::sigaction(sig, &sa, nullptr) < 0) {
+        throw std::system_error(errno, std::generic_category(), "sigaction");
+    }
 }
 
-void test_concurrency() {
-    constexpr int threads = 8;
-    constexpr int ops_per_thread = 100'000;
-    constexpr int keyspace = 1000;
-
-    Store s(16);
-    std::vector<std::jthread> workers;
-    workers.reserve(threads);
-
-    for (int t = 0; t < threads; ++t) {
-        workers.emplace_back([&, t] {
-            std::mt19937 rng(static_cast<unsigned>(t) + 1);
-            std::uniform_int_distribution<int> key_dist(0, keyspace - 1);
-            std::uniform_int_distribution<int> op_dist(0, 9);
-            for (int i = 0; i < ops_per_thread; ++i) {
-                const auto key = std::to_string(key_dist(rng));
-                const int op = op_dist(rng);
-                if (op < 5)        s.set(key, "v" + std::to_string(i));
-                else if (op < 9)   (void)s.get(key);
-                else               (void)s.del(key);
-            }
-        });
+template <typename T>
+T parse_int(std::string_view arg, const char* name) {
+    T out{};
+    const auto* begin = arg.data();
+    const auto* end = arg.data() + arg.size();
+    auto [ptr, ec] = std::from_chars(begin, end, out);
+    if (ec != std::errc{} || ptr != end) {
+        throw std::invalid_argument(std::string("invalid ") + name + ": '"
+                                    + std::string(arg) + "'");
     }
-    workers.clear();   // joins each jthread in its destructor
-
-    const auto live = s.keys();
-    assert(live.size() <= static_cast<std::size_t>(keyspace));
-
-    std::cout << "[ok] concurrency smoke (" << threads << " threads, "
-              << ops_per_thread << " ops/thread, " << live.size()
-              << " keys live)\n";
+    return out;
 }
 
-bool is_ok(const ParseResult& r) {
-    return std::holds_alternative<Command>(r);
-}
-bool is_err(const ParseResult& r) {
-    return std::holds_alternative<ParseError>(r);
-}
-const Command& cmd(const ParseResult& r) {
-    return std::get<Command>(r);
-}
-
-void test_protocol_parse() {
-    using namespace std::chrono_literals;
-
-    // KEYS
-    {
-        auto r = parse_line("KEYS");
-        assert(is_ok(r) && cmd(r).verb == Verb::KEYS);
-    }
-    assert(is_err(parse_line("KEYS extra")));
-
-    // GET / DEL / EXISTS — single key, no whitespace
-    {
-        auto r = parse_line("GET hello");
-        assert(is_ok(r) && cmd(r).verb == Verb::GET && cmd(r).key == "hello");
-    }
-    {
-        auto r = parse_line("GET hello\r");          // CRLF tolerated
-        assert(is_ok(r) && cmd(r).key == "hello");
-    }
-    assert(is_err(parse_line("GET")));
-    assert(is_err(parse_line("GET ")));              // trailing space, empty key
-    assert(is_err(parse_line("GET k extra")));
-    assert(is_err(parse_line("DEL")));
-    assert(is_ok(parse_line("DEL k")));
-    assert(is_ok(parse_line("EXISTS k")));
-
-    // SET — rest-of-line value
-    {
-        auto r = parse_line("SET k v");
-        assert(is_ok(r) && cmd(r).verb == Verb::SET);
-        assert(cmd(r).key == "k" && cmd(r).value == "v");
-    }
-    {
-        auto r = parse_line("SET k hello world");
-        assert(is_ok(r));
-        assert(cmd(r).key == "k" && cmd(r).value == "hello world");
-    }
-    {
-        auto r = parse_line("SET k hello\tworld");    // tab is part of value
-        assert(is_ok(r) && cmd(r).value == "hello\tworld");
-    }
-    assert(is_err(parse_line("SET")));
-    assert(is_err(parse_line("SET k")));              // missing value
-    assert(is_err(parse_line("SET k ")));             // empty value
-    assert(is_err(parse_line("SET  k v")));           // double space => empty key
-
-    // EXPIRE
-    {
-        auto r = parse_line("EXPIRE k 5");
-        assert(is_ok(r) && cmd(r).verb == Verb::EXPIRE);
-        assert(cmd(r).key == "k" && cmd(r).ttl == 5s);
-    }
-    {
-        auto r = parse_line("EXPIRE k 0");
-        assert(is_ok(r) && cmd(r).ttl == 0s);
-    }
-    assert(is_err(parse_line("EXPIRE k -1")));
-    assert(is_err(parse_line("EXPIRE k abc")));
-    assert(is_err(parse_line("EXPIRE k 5 extra")));   // trailing garbage
-    assert(is_err(parse_line("EXPIRE k")));           // missing ttl
-    assert(is_err(parse_line("EXPIRE")));
-
-    // Unknown / empty
-    assert(is_err(parse_line("HELLO")));
-    assert(is_err(parse_line("")));
-
-    // Oversize line
-    {
-        std::string huge(kMaxLineBytes + 1, 'x');
-        assert(is_err(parse_line(huge)));
-    }
-
-    std::cout << "[ok] protocol parser\n";
-}
-
-void test_protocol_responses() {
-    assert(respond_ok() == "OK\n");
-    assert(respond_not_found() == "NOT_FOUND\n");
-    assert(respond_value("x") == "VALUE x\n");
-    assert(respond_value("hello world") == "VALUE hello world\n");
-    assert(respond_count(0) == "COUNT 0\n");
-    assert(respond_count(42) == "COUNT 42\n");
-    assert(respond_key("foo") == "KEY foo\n");
-    assert(respond_error("oops") == "ERROR oops\n");
-    std::cout << "[ok] protocol response builders\n";
-}
-
-void test_threadpool_drains_queue() {
-    constexpr int tasks = 1000;
-    std::atomic<int> counter{0};
-    {
-        ThreadPool pool(4);
-        assert(pool.size() == 4);
-        for (int i = 0; i < tasks; ++i) {
-            pool.submit([&counter] {
-                std::this_thread::sleep_for(std::chrono::microseconds(50));
-                counter.fetch_add(1, std::memory_order_relaxed);
-            });
-        }
-    }   // ~ThreadPool drains the queue before returning
-    assert(counter.load() == tasks);
-    std::cout << "[ok] threadpool drains " << tasks << " tasks before dtor returns\n";
-}
-
-void test_threadpool_blocks_on_inflight_task() {
-    using namespace std::chrono_literals;
-    std::atomic<bool> task_done{false};
-    const auto start = std::chrono::steady_clock::now();
-    {
-        ThreadPool pool(2);
-        pool.submit([&task_done] {
-            std::this_thread::sleep_for(120ms);
-            task_done = true;
-        });
-        // Fall off scope immediately; destructor must wait for the long task.
-    }
-    const auto elapsed = std::chrono::steady_clock::now() - start;
-    assert(task_done.load());
-    assert(elapsed >= 100ms);
-    std::cout << "[ok] threadpool dtor waits for in-flight long task\n";
-}
-
-void test_threadpool_isolates_exceptions() {
-    std::atomic<int> good{0};
-    {
-        ThreadPool pool(2);
-        for (int i = 0; i < 10; ++i) {
-            pool.submit([] { throw std::runtime_error("boom"); });
-        }
-        for (int i = 0; i < 10; ++i) {
-            pool.submit([&good] { good.fetch_add(1); });
-        }
-    }
-    assert(good.load() == 10);
-    std::cout << "[ok] threadpool keeps workers alive across task exceptions\n";
+void print_usage(const char* prog) {
+    std::cerr << "Usage: " << prog << " [port [shards [threads]]]\n"
+              << "  port     listen port           (default 6379)\n"
+              << "  shards   store shard count     (default 16)\n"
+              << "  threads  worker thread count   (default hardware_concurrency())\n";
 }
 
 }  // namespace
 
-int main() {
-    test_single_threaded();
-    test_ttl();
-    test_concurrency();
-    test_protocol_parse();
-    test_protocol_responses();
-    test_threadpool_drains_queue();
-    test_threadpool_blocks_on_inflight_task();
-    test_threadpool_isolates_exceptions();
-    std::cout << "Store + Protocol + ThreadPool: all tests passed\n";
-    return 0;
+int main(int argc, char** argv) {
+    try {
+        std::uint16_t port = 6379;
+        std::size_t shards = 16;
+        std::size_t threads = std::thread::hardware_concurrency();
+        if (threads == 0) threads = 4;
+
+        if (argc > 1) port    = parse_int<std::uint16_t>(argv[1], "port");
+        if (argc > 2) shards  = parse_int<std::size_t>(argv[2], "shards");
+        if (argc > 3) threads = parse_int<std::size_t>(argv[3], "threads");
+        if (argc > 4) { print_usage(argv[0]); return 2; }
+
+        // Ignore SIGPIPE so a peer disconnecting mid-write doesn't terminate
+        // the process. send() with MSG_NOSIGNAL covers the socket path; this
+        // covers anything else (logging, future stdout/stderr writes).
+        install_signal(SIGPIPE, SIG_IGN);
+
+        // Declaration order is destruction order in reverse: server is built
+        // last so it's destroyed first. Server::run() blocks on its in-flight
+        // counter so all handlers are done before run() returns, which means
+        // by the time ~Server starts there's nobody left to touch `this`.
+        // Then ThreadPool can join its workers; then Store goes away.
+        Store store(shards);
+        ThreadPool pool(threads);
+        Server server(store, pool, port);
+
+        g_server.store(&server, std::memory_order_release);
+        install_signal(SIGINT, on_signal);
+        install_signal(SIGTERM, on_signal);
+
+        std::cout << "kvstore-server listening on :" << port
+                  << " shards=" << shards
+                  << " threads=" << pool.size() << "\n";
+
+        server.run();
+
+        g_server.store(nullptr, std::memory_order_release);
+        std::cout << "kvstore-server: shutdown complete\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "fatal: " << e.what() << "\n";
+        return 1;
+    }
 }

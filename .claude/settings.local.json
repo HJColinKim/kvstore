@@ -14,7 +14,9 @@
       "Bash(echo \"All three stubs compile cleanly under -Wall -Wextra -Wpedantic on $\\(/c/msys64/ucrt64/bin/g++.exe -dumpversion\\)\")",
       "Bash(git *)",
       "Bash(/c/msys64/ucrt64/bin/g++.exe *)",
-      "Bash(/tmp/kvstore-server.exe)"
+      "Bash(/tmp/kvstore-server.exe)",
+      "Read(//c/msys64/usr/bin/**)",
+      "Read(//c/msys64/usr/include/sys/**)"
     ]
   }
 }
