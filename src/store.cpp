@@ -49,6 +49,7 @@ std::optional<std::string> Store::get(std::string_view key) {
     auto& s = shard_for(key);
     {
         std::shared_lock lock(s.mtx);
+        //The key for this map is a string_view - not in the standard non-templated unordered_map interface for 'find', but functionally this still works with C++20's lookup overload. 
         auto it = s.map.find(key);
         if (it == s.map.end()) return std::nullopt;
         if (!is_expired(it->second.expires_at, clock::now())) {
