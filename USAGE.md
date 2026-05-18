@@ -313,6 +313,21 @@ Two things to check:
    expired — not an error.
 2. TTL is in **integer seconds**. Sub-second TTLs are not supported.
 
+### My IDE flags valid C++20 code (e.g. red squiggle under `.find(key)` in `store.cpp`)
+
+That call uses C++20 heterogeneous lookup (`unordered_map<string,...>::find(string_view)`),
+enabled by the `is_transparent` typedefs on `StringHash` / `StringEqual`. Real
+builds with `g++` accept it; older language servers may not.
+
+The CMake config emits `build/compile_commands.json` so the IDE picks up the
+real compile flags. Point your language server at it:
+
+- **VS Code + clangd**: install the *clangd* extension; it finds the file automatically.
+- **VS Code + Microsoft C/C++ extension**: set `"C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json"` and reload.
+- **Neovim + clangd**: clangd discovers `compile_commands.json` automatically when launched in the project root.
+
+Re-run `cmake -S . -B build` if the file doesn't exist yet.
+
 ### Client hangs after sending a request
 
 The server received malformed input and disconnected without responding

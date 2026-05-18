@@ -5,6 +5,12 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Emit build/compile_commands.json so IDEs / clangd can resolve includes and
+# the C++20 language flag. Without it, language servers may flag valid
+# heterogeneous-lookup calls (e.g. unordered_map<string,...>::find(string_view) which exists in our
+# codebase) as errors because they default to a pre-C++20 mode.
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 find_package(Threads REQUIRED)
 
 # Shared compile contract carried as an INTERFACE library so each executable
